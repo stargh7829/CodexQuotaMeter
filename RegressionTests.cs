@@ -158,6 +158,29 @@ internal static class RegressionTests
             Check(QuotaDisplayControl.RemainingColor(19, false).R >
                 QuotaDisplayControl.RemainingColor(19, false).G, "below 20 red");
 
+            DateTime reset = new DateTime(2026, 10, 8, 6, 41, 0, DateTimeKind.Local);
+            long resetUnix = new DateTimeOffset(reset).ToUnixTimeSeconds();
+            Check(QuotaDisplayControl.TitleResetTime(new QuotaWindow {
+                WindowMinutes = 300, ResetAtUnix = resetUnix }) == "06:41", "5h reset shows time only");
+            Check(QuotaDisplayControl.TitleResetTime(new QuotaWindow {
+                WindowMinutes = 10080, ResetAtUnix = resetUnix }) == "2026-10-08 06:41",
+                "weekly reset includes year month day and time");
+            Check(QuotaDisplayControl.TitleResetTime(new QuotaWindow {
+                WindowMinutes = 50400, ResetAtUnix = resetUnix }) == "2026-10-08 06:41",
+                "longer quota windows retain full reset date");
+            Check(QuotaDisplayControl.TitleResetTime(new QuotaWindow {
+                WindowMinutes = 10080, ResetAtUnix = 0 }) == "--:--", "unknown reset stays a placeholder");
+
+            Rectangle wide = QuotaOverlayForm.CalculateOverlayBounds(new Rectangle(100, 50, 1600, 900), 1f, 650);
+            Check(wide.Left + wide.Width / 2 == 900, "overlay centers on the whole Codex window");
+            Rectangle compact = QuotaOverlayForm.CalculateOverlayBounds(new Rectangle(100, 50, 900, 700), 1f, 650);
+            Check(compact.Left >= 430 && compact.Right <= 855, "compact overlay clears menu and window buttons");
+            Rectangle scaled = QuotaOverlayForm.CalculateOverlayBounds(new Rectangle(-2400, -200, 2400, 1350), 1.5f, 975);
+            Check(Math.Abs(scaled.Left + scaled.Width / 2 + 1200) <= 1 && scaled.Height == 48,
+                "centering follows DPI and negative monitor coordinates");
+            Check(QuotaOverlayForm.CalculateOverlayBounds(new Rectangle(0, 0, 600, 400), 1f, 650).IsEmpty,
+                "too-small title bars preserve menu access");
+
             Console.WriteLine("PASS: identity, request generation, parsing and colors");
             using (ManualResetEvent gate = new ManualResetEvent(false))
             {
@@ -222,18 +245,25 @@ internal static class RegressionTests
                 preview.Bind(a);
                 preview.Accept(preview.Revision, Snapshot(a, 47));
                 foreach (bool dark in new bool[] { false, true })
-                using (Form host = new Form())
+                using (Form host = new Form { FormBorderStyle = FormBorderStyle.None,
+                    ClientSize = new Size(1440, 32) })
                 using (QuotaDisplayControl control = new QuotaDisplayControl {
-                    Size = new Size(970, 32), Dark = dark,
+                    Dark = dark,
                     ForeColor = dark ? Color.FromArgb(210, 210, 215) : Color.FromArgb(65, 65, 70) })
                 {
                     host.BackColor = dark ? Color.FromArgb(43, 43, 46) : Color.FromArgb(245, 245, 242);
                     control.BackColor = host.BackColor;
                     host.Controls.Add(control);
                     control.SetState(preview);
-                    using (Bitmap bitmap = new Bitmap(970, 32))
+                    control.Bounds = QuotaOverlayForm.CalculateOverlayBounds(
+                        new Rectangle(0, 0, 1440, 32), 1f, control.PreferredWidth());
+                    using (Bitmap bitmap = new Bitmap(1440, 32))
+                    using (Bitmap panel = new Bitmap(control.Width, control.Height))
+                    using (Graphics graphics = Graphics.FromImage(bitmap))
                     {
-                        control.DrawToBitmap(bitmap, new Rectangle(0, 0, 970, 32));
+                        graphics.Clear(host.BackColor);
+                        control.DrawToBitmap(panel, new Rectangle(Point.Empty, control.Size));
+                        graphics.DrawImageUnscaled(panel, control.Location);
                         bitmap.Save(Path.Combine(args[1], dark ? "quota-dark.png" : "quota-light.png"));
                     }
                 }

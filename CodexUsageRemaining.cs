@@ -15,7 +15,7 @@ using Microsoft.Win32;
 
 [assembly: System.Reflection.AssemblyTitle("Codex 额度悬浮条")]
 [assembly: System.Reflection.AssemblyDescription("显示当前 Codex 账号及剩余额度，支持账号切换和窗口重建")]
-[assembly: System.Reflection.AssemblyVersion("1.1.0.0")]
+[assembly: System.Reflection.AssemblyVersion("1.1.1.0")]
 
 internal sealed class QuotaWindow
 {
@@ -109,7 +109,7 @@ internal static class QuotaReader
                 "https://chatgpt.com/backend-api/wham/usage");
             request.Method = "GET";
             request.Accept = "application/json";
-            request.UserAgent = "codex-quota-meter/1.1.0";
+            request.UserAgent = "codex-quota-meter/1.1.1";
             request.Timeout = 8000;
             request.ReadWriteTimeout = 8000;
             request.Headers[HttpRequestHeader.Authorization] = "Bearer " + credentials.AccessToken;
@@ -391,7 +391,7 @@ internal sealed class QuotaDisplayControl : Control
     internal static string ResetTime(long unix)
     {
         if (unix <= 0) return "未知";
-        try { return DateTimeOffset.FromUnixTimeSeconds(unix).LocalDateTime.ToString("MM-dd HH:mm"); }
+        try { return DateTimeOffset.FromUnixTimeSeconds(unix).LocalDateTime.ToString("yyyy-MM-dd HH:mm"); }
         catch { return "未知"; }
     }
 
@@ -439,7 +439,7 @@ internal sealed class QuotaDisplayControl : Control
                     normal, Int32.MaxValue, format).Width;
                 groupsWidth += graphics.MeasureString(value, large, Int32.MaxValue, format).Width;
                 groupsWidth += 20 * DpiScale;
-                groupsWidth += graphics.MeasureString(CompactResetTime(window.ResetAtUnix),
+                groupsWidth += graphics.MeasureString(TitleResetTime(window),
                     normal, Int32.MaxValue, format).Width;
             }
             string label = state.Credentials == null ? "—" : state.AccountLabel;
@@ -475,17 +475,18 @@ internal sealed class QuotaDisplayControl : Control
                 Draw(graphics, unknown ? "—" : Remaining(window), large,
                     unknown ? ForeColor : RemainingColor(100 - window.UsedPercent, Dark), format, paint, ref x);
                 x += 10 * DpiScale;
-                Draw(graphics, CompactResetTime(window.ResetAtUnix),
+                Draw(graphics, TitleResetTime(window),
                     normal, ForeColor, format, paint, ref x);
             }
             return x;
         }
     }
 
-    internal static string CompactResetTime(long unix)
+    internal static string TitleResetTime(QuotaWindow window)
     {
-        if (unix <= 0) return "--:--";
-        try { return DateTimeOffset.FromUnixTimeSeconds(unix).LocalDateTime.ToString("HH:mm"); }
+        if (window.ResetAtUnix <= 0) return "--:--";
+        try { return DateTimeOffset.FromUnixTimeSeconds(window.ResetAtUnix).LocalDateTime.ToString(
+            window.WindowMinutes >= 1440 ? "yyyy-MM-dd HH:mm" : "HH:mm"); }
         catch { return "--:--"; }
     }
     private void Draw(Graphics graphics, string text, Font font, Color color, StringFormat format,
@@ -700,17 +701,26 @@ internal sealed class QuotaOverlayForm : Form
         uint dpi;
         try { dpi = GetDpiForWindow(root); } catch { dpi = 96; }
         display.DpiScale = (dpi == 0 ? 96 : dpi) / 96f;
-        float scale = display.DpiScale;
+        Rectangle placement = CalculateOverlayBounds(
+            Rectangle.FromLTRB(bounds.Left, bounds.Top, bounds.Right, bounds.Bottom),
+            display.DpiScale, display.PreferredWidth());
+        if (placement.IsEmpty) { Hide(); return; }
+        if (!Visible) { allowVisible = true; Show(); allowVisible = false; }
+        SetWindowPos(Handle, new IntPtr(-1), placement.X, placement.Y,
+            placement.Width, placement.Height, NoActivate | ShowWindowFlag);
+    }
+
+    internal static Rectangle CalculateOverlayBounds(Rectangle window, float scale, int preferredWidth)
+    {
         int menuWidth = (int)(330 * scale);
         int buttonsWidth = (int)(145 * scale);
-        int available = bounds.Right - bounds.Left - menuWidth - buttonsWidth;
-        if (available < (int)(280 * scale)) { Hide(); return; }
-        int width = Math.Min(display.PreferredWidth(), available);
-        int x = bounds.Right - buttonsWidth - width;
-        int height = (int)(32 * scale);
-        int y = bounds.Top + (int)(1 * scale);
-        if (!Visible) { allowVisible = true; Show(); allowVisible = false; }
-        SetWindowPos(Handle, new IntPtr(-1), x, y, width, height, NoActivate | ShowWindowFlag);
+        int available = window.Width - menuWidth - buttonsWidth;
+        if (available < (int)(280 * scale)) return Rectangle.Empty;
+        int width = Math.Min(preferredWidth, available);
+        // Center on the Codex window; constrain only when its menu or buttons need room.
+        int centered = window.Left + (window.Width - width) / 2;
+        int x = Math.Max(window.Left + menuWidth, Math.Min(centered, window.Right - buttonsWidth - width));
+        return new Rectangle(x, window.Top + (int)scale, width, (int)(32 * scale));
     }
 
     private void RenderStatus()
