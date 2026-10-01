@@ -15,7 +15,7 @@ using Microsoft.Win32;
 
 [assembly: System.Reflection.AssemblyTitle("Codex 额度悬浮条")]
 [assembly: System.Reflection.AssemblyDescription("显示当前 Codex 账号及剩余额度，支持账号切换和窗口重建")]
-[assembly: System.Reflection.AssemblyVersion("1.1.2.0")]
+[assembly: System.Reflection.AssemblyVersion("1.1.3.0")]
 
 internal sealed class QuotaWindow
 {
@@ -36,6 +36,7 @@ internal sealed class QuotaSnapshot
 internal sealed class CodexCredentials
 {
     public string AccountLabel;
+    public string DisplayName;
     public string AccountKey;
     public string Fingerprint;
     public string AccessToken;
@@ -78,15 +79,20 @@ internal static class QuotaReader
 
             Dictionary<string, object> claims = JwtClaims(StringValue(tokens, "id_token"));
             Dictionary<string, object> accessClaims = JwtClaims(access);
+            Dictionary<string, object> profile = Object(accessClaims, "https://api.openai.com/profile");
             string userId = StringValue(claims, "sub");
             if (String.IsNullOrWhiteSpace(userId)) userId = StringValue(accessClaims, "sub");
+            string name = StringValue(claims, "name");
+            if (String.IsNullOrWhiteSpace(name)) name = StringValue(profile, "name");
+            name = String.IsNullOrWhiteSpace(name) ? String.Empty : name.Trim();
             string label = StringValue(claims, "email");
-            if (String.IsNullOrWhiteSpace(label)) label = StringValue(claims, "name");
+            if (String.IsNullOrWhiteSpace(label)) label = StringValue(profile, "email");
+            if (String.IsNullOrWhiteSpace(label)) label = name;
             if (String.IsNullOrWhiteSpace(label)) label = accountId;
             if (String.IsNullOrWhiteSpace(userId)) userId = label;
 
             return new CodexCredentials {
-                AccountLabel = label, AccountId = accountId, AccessToken = access,
+                AccountLabel = label, DisplayName = name, AccountId = accountId, AccessToken = access,
                 AccountKey = Hash(accountId + "\n" + userId),
                 Fingerprint = Hash(json)
             };
@@ -109,7 +115,7 @@ internal static class QuotaReader
                 "https://chatgpt.com/backend-api/wham/usage");
             request.Method = "GET";
             request.Accept = "application/json";
-            request.UserAgent = "codex-quota-meter/1.1.2";
+            request.UserAgent = "codex-quota-meter/1.1.3";
             request.Timeout = 8000;
             request.ReadWriteTimeout = 8000;
             request.Headers[HttpRequestHeader.Authorization] = "Bearer " + credentials.AccessToken;
@@ -253,6 +259,8 @@ internal sealed class AccountQuotaState
 
     public string AccountLabel
     { get { return Credentials == null ? "未登录" : Credentials.AccountLabel; } }
+    public string DisplayName
+    { get { return Credentials == null ? String.Empty : Credentials.DisplayName ?? String.Empty; } }
 }
 internal sealed class OverlayTheme
 {
@@ -443,21 +451,26 @@ internal sealed class QuotaDisplayControl : Control
                     normal, Int32.MaxValue, format).Width;
             }
             string label = state.Credentials == null ? "—" : state.AccountLabel;
-            float labelBudget = Math.Max(12 * DpiScale, Width - groupsWidth - 8 * DpiScale);
-            if (compact && graphics.MeasureString(label, normal, Int32.MaxValue, format).Width > labelBudget)
+            string name = state.DisplayName;
+            if (label == name) label = String.Empty;
+            float nameGap = String.IsNullOrEmpty(name) || String.IsNullOrEmpty(label) ? 0 : 16 * DpiScale;
+            if (compact)
             {
-                string original = label;
-                int characters = original.Length;
-                do {
-                    characters--;
-                    int left = (characters + 1) / 2;
-                    int right = characters / 2;
-                    label = original.Substring(0, left) + "…" + original.Substring(original.Length - right);
-                } while (characters > 1 &&
-                    graphics.MeasureString(label, normal, Int32.MaxValue, format).Width > labelBudget);
+                float identityBudget = Width - groupsWidth - 8 * DpiScale;
+                float emailReserve = String.IsNullOrEmpty(label) ? 0 : 24 * DpiScale;
+                name = FitText(graphics, name, large, format,
+                    Math.Max(12 * DpiScale, identityBudget - emailReserve - nameGap));
+                float nameWidth = graphics.MeasureString(name, large, Int32.MaxValue, format).Width;
+                label = FitText(graphics, label, normal, format,
+                    Math.Max(12 * DpiScale, identityBudget - nameWidth - nameGap));
             }
             float x = 4 * DpiScale;
             Draw(graphics, label, normal, ForeColor, format, paint, ref x);
+            if (!String.IsNullOrEmpty(name))
+            {
+                x += nameGap;
+                Draw(graphics, name, large, Color.Red, format, paint, ref x);
+            }
             foreach (QuotaWindow window in windows)
             {
                 bool unknown = Double.IsNaN(window.UsedPercent);
@@ -480,6 +493,21 @@ internal sealed class QuotaDisplayControl : Control
             }
             return x;
         }
+    }
+
+    private static string FitText(Graphics graphics, string value, Font font, StringFormat format, float width)
+    {
+        if (String.IsNullOrEmpty(value) || graphics.MeasureString(value, font, Int32.MaxValue, format).Width <= width)
+            return value;
+        string original = value;
+        int characters = original.Length;
+        do {
+            characters--;
+            int left = (characters + 1) / 2;
+            int right = characters / 2;
+            value = original.Substring(0, left) + "…" + original.Substring(original.Length - right);
+        } while (characters > 1 && graphics.MeasureString(value, font, Int32.MaxValue, format).Width > width);
+        return value;
     }
 
     internal static string TitleResetTime(QuotaWindow window)

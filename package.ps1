@@ -4,7 +4,7 @@ $ErrorActionPreference = 'Stop'
 $distRoot = Join-Path $PSScriptRoot 'dist'
 $staging = Join-Path $distRoot ('staging-' + [guid]::NewGuid().ToString('N'))
 $packageDir = Join-Path $staging 'CodexQuotaMeter'
-$zipPath = Join-Path $distRoot 'CodexQuotaMeter-Windows-v1.1.2.zip'
+$zipPath = Join-Path $distRoot 'CodexQuotaMeter-Windows-v1.1.3.zip'
 New-Item -ItemType Directory -Path $packageDir -Force | Out-Null
 try {
     $files = @('CodexQuotaMeter.exe', 'setup.ps1', 'setup.bat', '一键配置.bat', 'launch-detached.ps1',

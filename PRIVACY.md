@@ -1,6 +1,6 @@
 # 隐私与数据访问
 
-应用读取当前用户的 Codex auth.json，以内存中的访问令牌及账号标识请求 OpenAI 的额度接口：https://chatgpt.com/backend-api/wham/usage。账号邮箱从本机 id_token 声明读取，只用于本地显示。
+应用读取当前用户的 Codex auth.json，以内存中的访问令牌及账号标识请求 OpenAI 的额度接口：https://chatgpt.com/backend-api/wham/usage。账号邮箱和用户名从本机登录令牌的声明读取，包括 id_token 和访问令牌的 profile 声明，只用于本地显示。
 
 应用读取 config.toml 的外观选项。应用不写入 Codex 的登录文件，不保存账号或令牌，不读取历史额度日志，不收集遥测，不向项目作者的服务器发送数据。网络失败只保留内存中同一账号的最近成功额度，并标记刷新失败；切换或退出账号会清空数据。
 

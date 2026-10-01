@@ -21,10 +21,10 @@ internal static class RegressionTests
         assertions++;
     }
 
-    private static string AuthJson(string user, string email, string access)
+    private static string AuthJson(string user, string email, string access, string name = null)
     {
         string payload = Convert.ToBase64String(Encoding.UTF8.GetBytes(
-            new JavaScriptSerializer().Serialize(new { sub = user, email = email })))
+            new JavaScriptSerializer().Serialize(new { sub = user, email = email, name = name })))
             .TrimEnd('=').Replace('+', '-').Replace('/', '_');
         return new JavaScriptSerializer().Serialize(new { tokens = new {
             access_token = access, account_id = "test-workspace", id_token = "test." + payload + ".test"
@@ -82,6 +82,8 @@ internal static class RegressionTests
             File.WriteAllText(args[2], new JavaScriptSerializer().Serialize(new {
                 outside_codex_package = independent, startup_matches = startupMatches,
                 account_matches = accountMatches, windows = quota == null ? 0 : quota.Windows.Count,
+                display_name_available = after != null && !String.IsNullOrEmpty(after.DisplayName),
+                display_name_matches = auth != null && after != null && auth.DisplayName == after.DisplayName,
                 diagnostic = QuotaReader.LastDiagnostic
             }));
             Check(independent && startupMatches && (expectedDisabled || accountMatches),
@@ -113,26 +115,40 @@ internal static class RegressionTests
         string path = Path.Combine(folder, "auth-test.json");
         try
         {
-            File.WriteAllText(path, AuthJson("user-a", "alice@example.invalid", "test-token-a"));
+            File.WriteAllText(path, AuthJson("user-a", "alice@example.invalid", "test-token-a", "Alice"));
             CodexCredentials a = QuotaReader.ReadCredentialsFrom(path);
             Check(a != null && a.AccountLabel == "alice@example.invalid", "email from selected credentials");
-            File.WriteAllText(path, AuthJson("user-b", "bob@example.invalid", "test-token-b"));
+            Check(a.DisplayName == "Alice", "display name comes from the current login claims");
+            File.WriteAllText(path, AuthJson("user-b", "bob@example.invalid", "test-token-b", "Bob"));
             CodexCredentials b = QuotaReader.ReadCredentialsFrom(path);
             Check(a.AccountKey != b.AccountKey, "same workspace, different user remains distinct");
+
+            string profilePayload = Convert.ToBase64String(Encoding.UTF8.GetBytes(
+                new JavaScriptSerializer().Serialize(new Dictionary<string, object> {
+                    { "https://api.openai.com/profile", new { name = "小林", email = "lin@example.invalid" } }
+                }))).TrimEnd('=').Replace('+', '-').Replace('/', '_');
+            File.WriteAllText(path, AuthJson("user-c", null, "test." + profilePayload + ".test", " "));
+            CodexCredentials profile = QuotaReader.ReadCredentialsFrom(path);
+            Check(profile != null && profile.DisplayName == "小林" && profile.AccountLabel == "lin@example.invalid",
+                "access-token profile supplies missing email and display name");
+            File.WriteAllText(path, AuthJson("user-d", "unknown@example.invalid", "test-token-d"));
+            Check(QuotaReader.ReadCredentialsFrom(path).DisplayName == String.Empty,
+                "missing name remains empty rather than invented");
 
             AccountQuotaState state = new AccountQuotaState();
             state.Bind(a);
             long revisionA = state.Revision;
             Check(state.Accept(revisionA, Snapshot(a, 70)), "first account accepts matching response");
             state.Bind(b);
-            Check(state.Snapshot == null && state.AccountLabel == "bob@example.invalid",
+            Check(state.Snapshot == null && state.AccountLabel == "bob@example.invalid" && state.DisplayName == "Bob",
                 "switch clears previous quotas and updates account");
             Check(!state.Accept(revisionA, Snapshot(a, 1)), "reject request from previous account");
             state.Bind(a);
+            Check(state.DisplayName == "Alice", "switch-back restores the selected user's display name");
             Check(!state.Accept(revisionA, Snapshot(a, 1)), "A-B-A rejects stale A response");
             Check(state.Accept(state.Revision, Snapshot(a, 70)), "fresh request after switch-back");
 
-            File.WriteAllText(path, AuthJson("user-a", "alice@example.invalid", "test-token-a-renewed"));
+            File.WriteAllText(path, AuthJson("user-a", "alice@example.invalid", "test-token-a-renewed", "Alice"));
             CodexCredentials renewed = QuotaReader.ReadCredentialsFrom(path);
             state.Bind(renewed);
             Check(state.Snapshot != null && !state.IsLive, "token renewal keeps only same-user stale snapshot");
@@ -141,7 +157,8 @@ internal static class RegressionTests
             File.WriteAllText(path, "{partial");
             Check(QuotaReader.ReadCredentialsFrom(path) == null, "partial auth is unavailable");
             state.Bind(null);
-            Check(state.Snapshot == null && state.AccountLabel == "未登录", "logout clears data");
+            Check(state.Snapshot == null && state.AccountLabel == "未登录" && state.DisplayName == String.Empty,
+                "logout clears data and display name");
             File.Delete(path);
             Check(QuotaReader.ReadCredentialsFrom(path) == null, "missing auth is unavailable");
 
@@ -204,7 +221,8 @@ internal static class RegressionTests
                     overlay.Tick(); // Simulate the next one-minute timer event.
                     PumpUntil(delegate { return overlay.State.Snapshot != null; });
                     Check(overlay.State.AccountLabel == "bob@example.invalid" &&
-                        overlay.State.Snapshot.Windows[0].UsedPercent == 47, "UI rejects in-flight A result");
+                        overlay.State.DisplayName == "Bob" && overlay.State.Snapshot.Windows[0].UsedPercent == 47,
+                        "UI rejects in-flight A result and retains the new user's name");
                 }
             }
 
