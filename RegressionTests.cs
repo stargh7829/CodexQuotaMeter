@@ -246,7 +246,7 @@ internal static class RegressionTests
                 preview.Accept(preview.Revision, Snapshot(a, 47));
                 foreach (bool dark in new bool[] { false, true })
                 using (Form host = new Form { FormBorderStyle = FormBorderStyle.None,
-                    ClientSize = new Size(1440, 32) })
+                    ClientSize = new Size(1440, 64) })
                 using (QuotaDisplayControl control = new QuotaDisplayControl {
                     Dark = dark,
                     ForeColor = dark ? Color.FromArgb(210, 210, 215) : Color.FromArgb(65, 65, 70) })
@@ -256,8 +256,8 @@ internal static class RegressionTests
                     host.Controls.Add(control);
                     control.SetState(preview);
                     control.Bounds = QuotaOverlayForm.CalculateOverlayBounds(
-                        new Rectangle(0, 0, 1440, 32), 1f, control.PreferredWidth());
-                    using (Bitmap bitmap = new Bitmap(1440, 32))
+                        new Rectangle(0, 0, 1440, 64), 1f, control.PreferredWidth());
+                    using (Bitmap bitmap = new Bitmap(1440, 64))
                     using (Bitmap panel = new Bitmap(control.Width, control.Height))
                     using (Graphics graphics = Graphics.FromImage(bitmap))
                     {

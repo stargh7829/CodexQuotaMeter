@@ -2,7 +2,7 @@
 
 在 Codex 窗口顶部显示当前账号和剩余额度。中文界面，支持多账号切换、Codex 窗口重建以及随 Windows 自动启动。
 
-[下载 Windows 安装包](https://github.com/stargh7829/CodexQuotaMeter/releases/latest/download/CodexQuotaMeter-Windows-v1.1.1.zip) · [查看版本](https://github.com/stargh7829/CodexQuotaMeter/releases)
+[下载 Windows 安装包](https://github.com/stargh7829/CodexQuotaMeter/releases/latest/download/CodexQuotaMeter-Windows-v1.1.2.zip) · [查看版本](https://github.com/stargh7829/CodexQuotaMeter/releases)
 
 ## 一键使用
 
@@ -22,7 +22,7 @@
 
 - 剩余 ≥ 60%：绿色；20% ≤ 剩余 < 60%：黄色；剩余 < 20%：红色。
 - 剩余百分比加粗放大，账号和重置时间保持普通字号。
-- 账号、5h、周采用三个明确留白的区域，以细分隔线隔开。5h 和周各自的百分比、重置时间排在同一组；5h 只显示时分，周显示完整年月日和时分。托盘菜单提供刷新状态。额度条以 Codex 整个窗口为中心，标题栏较窄时避开菜单和窗口按钮，并缩略邮箱。
+- 账号、5h、周采用三个明确留白的区域，以细分隔线隔开。5h 和周各自的百分比、重置时间排在同一组；5h 只显示时分，周显示完整年月日和时分。托盘菜单提供刷新状态。额度条以 Codex 整个窗口为中心，顶部留出约一行普通文字的空白；标题栏较窄时避开菜单和窗口按钮，并缩略邮箱。
 - 额度窗口按接口实际返回的时长显示。某些套餐的窗口并非 5h/一周，程序会显示实际时长。
 
 ## 账号与刷新

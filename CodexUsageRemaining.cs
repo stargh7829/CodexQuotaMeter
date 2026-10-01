@@ -15,7 +15,7 @@ using Microsoft.Win32;
 
 [assembly: System.Reflection.AssemblyTitle("Codex 额度悬浮条")]
 [assembly: System.Reflection.AssemblyDescription("显示当前 Codex 账号及剩余额度，支持账号切换和窗口重建")]
-[assembly: System.Reflection.AssemblyVersion("1.1.1.0")]
+[assembly: System.Reflection.AssemblyVersion("1.1.2.0")]
 
 internal sealed class QuotaWindow
 {
@@ -109,7 +109,7 @@ internal static class QuotaReader
                 "https://chatgpt.com/backend-api/wham/usage");
             request.Method = "GET";
             request.Accept = "application/json";
-            request.UserAgent = "codex-quota-meter/1.1.1";
+            request.UserAgent = "codex-quota-meter/1.1.2";
             request.Timeout = 8000;
             request.ReadWriteTimeout = 8000;
             request.Headers[HttpRequestHeader.Authorization] = "Bearer " + credentials.AccessToken;
@@ -720,7 +720,8 @@ internal sealed class QuotaOverlayForm : Form
         // Center on the Codex window; constrain only when its menu or buttons need room.
         int centered = window.Left + (window.Width - width) / 2;
         int x = Math.Max(window.Left + menuWidth, Math.Min(centered, window.Right - buttonsWidth - width));
-        return new Rectangle(x, window.Top + (int)scale, width, (int)(32 * scale));
+        // Reserve one normal text line above the overlay, following the window DPI.
+        return new Rectangle(x, window.Top + (int)(17 * scale), width, (int)(32 * scale));
     }
 
     private void RenderStatus()
