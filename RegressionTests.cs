@@ -1,0 +1,245 @@
+using System;
+using System.Collections.Generic;
+using System.Drawing;
+using System.IO;
+using System.Runtime.InteropServices;
+using System.Text;
+using System.Threading;
+using System.Web.Script.Serialization;
+using System.Windows.Forms;
+using Microsoft.Win32;
+
+internal static class RegressionTests
+{
+    private static int assertions;
+    [DllImport("user32.dll")] private static extern IntPtr GetWindow(IntPtr window, uint command);
+    [DllImport("kernel32.dll", CharSet = CharSet.Unicode)]
+    private static extern int GetCurrentPackageFullName(ref uint length, StringBuilder name);
+    private static void Check(bool value, string name)
+    {
+        if (!value) throw new Exception("FAILED: " + name);
+        assertions++;
+    }
+
+    private static string AuthJson(string user, string email, string access)
+    {
+        string payload = Convert.ToBase64String(Encoding.UTF8.GetBytes(
+            new JavaScriptSerializer().Serialize(new { sub = user, email = email })))
+            .TrimEnd('=').Replace('+', '-').Replace('/', '_');
+        return new JavaScriptSerializer().Serialize(new { tokens = new {
+            access_token = access, account_id = "test-workspace", id_token = "test." + payload + ".test"
+        }});
+    }
+
+    private static QuotaSnapshot Snapshot(CodexCredentials auth, int used)
+    {
+        return QuotaReader.ParseUsage("{\"rate_limit\":{\"primary_window\":{\"used_percent\":" + used +
+            ",\"limit_window_seconds\":18000,\"reset_at\":1790863200},\"secondary_window\":{\"used_percent\":10," +
+            "\"limit_window_seconds\":604800,\"reset_at\":1791457200}}}", auth);
+    }
+
+    private static void PumpUntil(Func<bool> done)
+    {
+        DateTime end = DateTime.UtcNow.AddSeconds(5);
+        while (!done() && DateTime.UtcNow < end)
+        {
+            Application.DoEvents();
+            Thread.Sleep(10);
+        }
+        Check(done(), "asynchronous request completed");
+    }
+
+    [STAThread]
+    private static void Main(string[] args)
+    {
+        try { Run(args); }
+        catch (Exception exception)
+        {
+            Console.WriteLine("FAILED_TYPE: " + exception.GetType().FullName);
+            try { Console.WriteLine("FAILED_MESSAGE: " + exception.Message); } catch { }
+            try { Console.WriteLine(exception.StackTrace); } catch { }
+            Environment.ExitCode = 1;
+        }
+    }
+
+    private static void Run(string[] args)
+    {
+        if (args.Length > 2 && args[0] == "--installed")
+        {
+            string startup;
+            using (RegistryKey key = Registry.CurrentUser.OpenSubKey(
+                @"Software\Microsoft\Windows\CurrentVersion\Run"))
+                startup = key == null ? null : key.GetValue("CodexQuotaMeter") as string;
+            uint length = 0;
+            bool independent = GetCurrentPackageFullName(ref length, null) == 15700;
+            bool expectedDisabled = args.Length > 3 && args[3] == "disabled";
+            bool startupMatches = expectedDisabled ? startup == null : startup == "\"" + args[1] + "\"";
+            CodexCredentials auth = QuotaReader.ReadCredentials();
+            QuotaSnapshot quota = expectedDisabled || auth == null ? null : QuotaReader.ReadRemote(auth);
+            CodexCredentials after = QuotaReader.ReadCredentials();
+            bool accountMatches = quota != null && after != null &&
+                quota.CredentialFingerprint == after.Fingerprint;
+            File.WriteAllText(args[2], new JavaScriptSerializer().Serialize(new {
+                outside_codex_package = independent, startup_matches = startupMatches,
+                account_matches = accountMatches, windows = quota == null ? 0 : quota.Windows.Count,
+                diagnostic = QuotaReader.LastDiagnostic
+            }));
+            Check(independent && startupMatches && (expectedDisabled || accountMatches),
+                "independent installation and startup verification");
+            return;
+        }
+        if (args.Length > 0 && args[0] == "--live")
+        {
+            CodexCredentials auth = QuotaReader.ReadCredentials();
+            QuotaSnapshot result = auth == null ? null : QuotaReader.ReadRemote(auth);
+            CodexCredentials after = QuotaReader.ReadCredentials();
+            Check(auth != null, "current credentials available");
+            if (result == null)
+            {
+                Console.WriteLine("LIVE_UNAVAILABLE: " + QuotaReader.LastDiagnostic);
+                Environment.ExitCode = 2;
+                return;
+            }
+            Check(after != null && result.CredentialFingerprint == after.Fingerprint,
+                "live quota belongs to current credentials");
+            Console.WriteLine("LIVE_OK: account_matches=true; windows=" + result.Windows.Count);
+            return;
+        }
+
+        Application.EnableVisualStyles();
+        Check(QuotaOverlayForm.RefreshIntervalMilliseconds == 60000, "account and quota interval is one minute");
+        string folder = Path.Combine(Path.GetTempPath(), "CodexQuotaTests-" + Guid.NewGuid().ToString("N"));
+        Directory.CreateDirectory(folder);
+        string path = Path.Combine(folder, "auth-test.json");
+        try
+        {
+            File.WriteAllText(path, AuthJson("user-a", "alice@example.invalid", "test-token-a"));
+            CodexCredentials a = QuotaReader.ReadCredentialsFrom(path);
+            Check(a != null && a.AccountLabel == "alice@example.invalid", "email from selected credentials");
+            File.WriteAllText(path, AuthJson("user-b", "bob@example.invalid", "test-token-b"));
+            CodexCredentials b = QuotaReader.ReadCredentialsFrom(path);
+            Check(a.AccountKey != b.AccountKey, "same workspace, different user remains distinct");
+
+            AccountQuotaState state = new AccountQuotaState();
+            state.Bind(a);
+            long revisionA = state.Revision;
+            Check(state.Accept(revisionA, Snapshot(a, 70)), "first account accepts matching response");
+            state.Bind(b);
+            Check(state.Snapshot == null && state.AccountLabel == "bob@example.invalid",
+                "switch clears previous quotas and updates account");
+            Check(!state.Accept(revisionA, Snapshot(a, 1)), "reject request from previous account");
+            state.Bind(a);
+            Check(!state.Accept(revisionA, Snapshot(a, 1)), "A-B-A rejects stale A response");
+            Check(state.Accept(state.Revision, Snapshot(a, 70)), "fresh request after switch-back");
+
+            File.WriteAllText(path, AuthJson("user-a", "alice@example.invalid", "test-token-a-renewed"));
+            CodexCredentials renewed = QuotaReader.ReadCredentialsFrom(path);
+            state.Bind(renewed);
+            Check(state.Snapshot != null && !state.IsLive, "token renewal keeps only same-user stale snapshot");
+            state.Failed(state.Revision);
+            Check(state.Status.Contains("上次数据"), "failed refresh is visibly stale");
+            File.WriteAllText(path, "{partial");
+            Check(QuotaReader.ReadCredentialsFrom(path) == null, "partial auth is unavailable");
+            state.Bind(null);
+            Check(state.Snapshot == null && state.AccountLabel == "未登录", "logout clears data");
+            File.Delete(path);
+            Check(QuotaReader.ReadCredentialsFrom(path) == null, "missing auth is unavailable");
+
+            QuotaSnapshot parsed = Snapshot(b, 47);
+            Check(parsed.Windows[0].WindowMinutes == 300 && parsed.Windows[1].WindowMinutes == 10080,
+                "5h then weekly order");
+            Check(QuotaDisplayControl.Remaining(parsed.Windows[0]) == "53%", "remaining, not used percentage");
+            Check(QuotaDisplayControl.RemainingColor(61, false).G >
+                QuotaDisplayControl.RemainingColor(61, false).R, "above 60 green");
+            Check(QuotaDisplayControl.RemainingColor(59, false) == QuotaDisplayControl.RemainingColor(20, false),
+                "20 through below 60 yellow");
+            Check(QuotaDisplayControl.RemainingColor(60, false) == QuotaDisplayControl.RemainingColor(61, false),
+                "60 and above green");
+            Check(QuotaDisplayControl.RemainingColor(19, false).R >
+                QuotaDisplayControl.RemainingColor(19, false).G, "below 20 red");
+
+            Console.WriteLine("PASS: identity, request generation, parsing and colors");
+            using (ManualResetEvent gate = new ManualResetEvent(false))
+            {
+                CodexCredentials current = a;
+                int calls = 0;
+                using (QuotaOverlayForm overlay = new QuotaOverlayForm(delegate { return current; },
+                    delegate(CodexCredentials auth) {
+                        if (Interlocked.Increment(ref calls) == 1) gate.WaitOne(3000);
+                        return Snapshot(auth, auth == a ? 80 : 47);
+                    }, delegate { return false; }, false))
+                {
+                    overlay.Tick();
+                    PumpUntil(delegate { return calls == 1; });
+                    current = b;
+                    overlay.Tick();
+                    Check(overlay.State.Snapshot == null, "UI clears previous account during pending request");
+                    gate.Set();
+                    PumpUntil(delegate { return !overlay.IsReading; });
+                    Check(overlay.State.Snapshot == null && calls == 1,
+                        "stale completion waits for next minute rather than requesting again");
+                    overlay.Tick(); // Simulate the next one-minute timer event.
+                    PumpUntil(delegate { return overlay.State.Snapshot != null; });
+                    Check(overlay.State.AccountLabel == "bob@example.invalid" &&
+                        overlay.State.Snapshot.Windows[0].UsedPercent == 47, "UI rejects in-flight A result");
+                }
+            }
+
+            IntPtr target = IntPtr.Zero;
+            using (QuotaOverlayForm overlay = new QuotaOverlayForm(delegate { return b; },
+                delegate(CodexCredentials auth) { return Snapshot(auth, 47); },
+                delegate(IntPtr window) { return window == target; }, false))
+            {
+                using (Form first = new Form { StartPosition = FormStartPosition.Manual,
+                    Bounds = new Rectangle(-20000, -20000, 1500, 800) })
+                {
+                    target = first.Handle;
+                    overlay.TrackWindow(target);
+                    Check(overlay.Visible && overlay.TrackedWindow == target, "attach initial window");
+                    Check(GetWindow(overlay.Handle, 4) != target && overlay.Owner == null,
+                        "Codex window is not the overlay owner");
+                    first.Close();
+                    Application.DoEvents();
+                    Check(!overlay.IsDisposed, "Codex window close preserves overlay process/form");
+                }
+                overlay.TrackWindow(IntPtr.Zero);
+                Check(!overlay.Visible, "hide while target is closed");
+                using (Form second = new Form { StartPosition = FormStartPosition.Manual,
+                    Bounds = new Rectangle(-20000, -20000, 1500, 800) })
+                {
+                    target = second.Handle;
+                    overlay.TrackWindow(target);
+                    Check(overlay.Visible && overlay.TrackedWindow == target, "reattach recreated window");
+                    overlay.TrackWindow(IntPtr.Zero);
+                    Check(!overlay.Visible, "hide when another application is active");
+                }
+            }
+
+            if (args.Length > 1 && args[0] == "--preview")
+            {
+                Directory.CreateDirectory(args[1]);
+                AccountQuotaState preview = new AccountQuotaState();
+                preview.Bind(a);
+                preview.Accept(preview.Revision, Snapshot(a, 47));
+                foreach (bool dark in new bool[] { false, true })
+                using (Form host = new Form())
+                using (QuotaDisplayControl control = new QuotaDisplayControl {
+                    Size = new Size(970, 32), Dark = dark,
+                    ForeColor = dark ? Color.FromArgb(210, 210, 215) : Color.FromArgb(65, 65, 70) })
+                {
+                    host.BackColor = dark ? Color.FromArgb(43, 43, 46) : Color.FromArgb(245, 245, 242);
+                    control.BackColor = host.BackColor;
+                    host.Controls.Add(control);
+                    control.SetState(preview);
+                    using (Bitmap bitmap = new Bitmap(970, 32))
+                    {
+                        control.DrawToBitmap(bitmap, new Rectangle(0, 0, 970, 32));
+                        bitmap.Save(Path.Combine(args[1], dark ? "quota-dark.png" : "quota-light.png"));
+                    }
+                }
+            }
+            Console.WriteLine("PASS: " + assertions + " regression assertions");
+        }
+        finally { File.Delete(path); Directory.Delete(folder); }
+    }
+}

@@ -1,0 +1,13 @@
+*.exe
+*.pdb
+/dist/
+auth.json
+*.sqlite
+*.sqlite-*
+.codex/
+*.diagnostics.txt
+*.key
+*.pem
+*.pfx
+*.p12
+.vs/

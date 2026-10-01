@@ -1,0 +1,41 @@
+name: Windows 发布包
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  release:
+    runs-on: windows-2022
+    timeout-minutes: 10
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: 获取源码
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: 验证账号切换与窗口恢复
+        run: ./test.ps1
+      - name: 构建安装包
+        run: ./package.ps1
+      - name: 发布下载文件
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RELEASE_TAG: ${{ github.ref_name }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $zip = "dist/CodexQuotaMeter-Windows-$env:RELEASE_TAG.zip"
+          $notes = "docs/RELEASE-$env:RELEASE_TAG.md"
+          if (-not (Test-Path -LiteralPath $zip) -or -not (Test-Path -LiteralPath $notes)) {
+              throw '版本标签与安装包或说明不匹配。'
+          }
+          gh release create $env:RELEASE_TAG $zip "$zip.sha256" `
+            --repo $env:GITHUB_REPOSITORY --verify-tag `
+            --title "Codex 额度悬浮条 $env:RELEASE_TAG" --notes-file $notes
+          if ($LASTEXITCODE -ne 0) { throw '发布失败。' }
