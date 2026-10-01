@@ -15,7 +15,7 @@ using Microsoft.Win32;
 
 [assembly: System.Reflection.AssemblyTitle("Codex 额度悬浮条")]
 [assembly: System.Reflection.AssemblyDescription("显示当前 Codex 账号及剩余额度，支持账号切换和窗口重建")]
-[assembly: System.Reflection.AssemblyVersion("1.1.3.0")]
+[assembly: System.Reflection.AssemblyVersion("1.1.4.0")]
 
 internal sealed class QuotaWindow
 {
@@ -30,13 +30,14 @@ internal sealed class QuotaSnapshot
     public readonly List<QuotaWindow> Windows = new List<QuotaWindow>();
     public string AccountLabel;
     public string CredentialFingerprint;
+    public string DisplayName;
+    public bool ProfileReadSucceeded;
 }
 
 // Credentials stay in memory. Identity includes both the user and selected workspace.
 internal sealed class CodexCredentials
 {
     public string AccountLabel;
-    public string DisplayName;
     public string AccountKey;
     public string Fingerprint;
     public string AccessToken;
@@ -92,7 +93,7 @@ internal static class QuotaReader
             if (String.IsNullOrWhiteSpace(userId)) userId = label;
 
             return new CodexCredentials {
-                AccountLabel = label, DisplayName = name, AccountId = accountId, AccessToken = access,
+                AccountLabel = label, AccountId = accountId, AccessToken = access,
                 AccountKey = Hash(accountId + "\n" + userId),
                 Fingerprint = Hash(json)
             };
@@ -110,22 +111,25 @@ internal static class QuotaReader
     {
         try
         {
-            ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12;
-            HttpWebRequest request = (HttpWebRequest)WebRequest.Create(
-                "https://chatgpt.com/backend-api/wham/usage");
-            request.Method = "GET";
-            request.Accept = "application/json";
-            request.UserAgent = "codex-quota-meter/1.1.3";
-            request.Timeout = 8000;
-            request.ReadWriteTimeout = 8000;
-            request.Headers[HttpRequestHeader.Authorization] = "Bearer " + credentials.AccessToken;
-            request.Headers["ChatGPT-Account-Id"] = credentials.AccountId;
-            string json;
-            using (HttpWebResponse response = (HttpWebResponse)request.GetResponse())
-            using (StreamReader reader = new StreamReader(response.GetResponseStream(), Encoding.UTF8))
-                json = reader.ReadToEnd();
+            string json = ReadJson("/wham/usage", credentials);
             QuotaSnapshot snapshot = ParseUsage(json, credentials);
             LastDiagnostic = snapshot == null ? "接口未返回额度窗口" : "刷新成功";
+            if (snapshot != null)
+            {
+                // The login claim name can differ from the editable Codex profile display name.
+                // Use the current client's profile endpoint and the same captured credentials.
+                try
+                {
+                    snapshot.DisplayName = ParseProfileDisplayName(ReadJson("/wham/profiles/me", credentials));
+                    snapshot.ProfileReadSucceeded = true;
+                }
+                catch (WebException exception)
+                {
+                    if (exception.Response != null) exception.Response.Dispose();
+                    LastDiagnostic = "额度刷新成功，昵称暂未更新";
+                }
+                catch { LastDiagnostic = "额度刷新成功，昵称暂未更新"; }
+            }
             return snapshot;
         }
         catch (WebException exception)
@@ -141,6 +145,31 @@ internal static class QuotaReader
             LastDiagnostic = "额度读取失败：" + exception.GetType().Name;
             return null;
         }
+    }
+
+    private static string ReadJson(string route, CodexCredentials credentials)
+    {
+        ServicePointManager.SecurityProtocol |= SecurityProtocolType.Tls12;
+        HttpWebRequest request = (HttpWebRequest)WebRequest.Create("https://chatgpt.com/backend-api" + route);
+        request.Method = "GET";
+        request.Accept = "application/json";
+        request.UserAgent = "codex-quota-meter/1.1.4";
+        request.Timeout = 8000;
+        request.ReadWriteTimeout = 8000;
+        request.Headers[HttpRequestHeader.Authorization] = "Bearer " + credentials.AccessToken;
+        request.Headers["ChatGPT-Account-Id"] = credentials.AccountId;
+        using (HttpWebResponse response = (HttpWebResponse)request.GetResponse())
+        using (StreamReader reader = new StreamReader(response.GetResponseStream(), Encoding.UTF8))
+            return reader.ReadToEnd();
+    }
+
+    internal static string ParseProfileDisplayName(string json)
+    {
+        Dictionary<string, object> profile = Object(Parse(json), "profile");
+        object value;
+        if (profile == null || !profile.TryGetValue("display_name", out value) ||
+            (value != null && !(value is string))) throw new FormatException("Invalid profile schema");
+        return value == null ? String.Empty : ((string)value).Trim();
     }
 
     internal static QuotaSnapshot ParseUsage(string json, CodexCredentials credentials)
@@ -243,6 +272,9 @@ internal sealed class AccountQuotaState
     {
         if (revision != Revision || Credentials == null || snapshot == null ||
             snapshot.CredentialFingerprint != Credentials.Fingerprint) return false;
+        // A profile-only failure must not hide quotas or replace a verified same-account name.
+        if (!snapshot.ProfileReadSucceeded)
+            snapshot.DisplayName = Snapshot == null ? String.Empty : Snapshot.DisplayName;
         Snapshot = snapshot;
         UpdatedAt = DateTime.Now;
         IsLive = true;
@@ -260,7 +292,7 @@ internal sealed class AccountQuotaState
     public string AccountLabel
     { get { return Credentials == null ? "未登录" : Credentials.AccountLabel; } }
     public string DisplayName
-    { get { return Credentials == null ? String.Empty : Credentials.DisplayName ?? String.Empty; } }
+    { get { return Snapshot == null ? String.Empty : Snapshot.DisplayName ?? String.Empty; } }
 }
 internal sealed class OverlayTheme
 {

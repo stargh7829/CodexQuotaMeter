@@ -31,11 +31,17 @@ internal static class RegressionTests
         }});
     }
 
-    private static QuotaSnapshot Snapshot(CodexCredentials auth, int used)
+    private static QuotaSnapshot Snapshot(CodexCredentials auth, int used, string name = null,
+        bool profileReadSucceeded = true)
     {
-        return QuotaReader.ParseUsage("{\"rate_limit\":{\"primary_window\":{\"used_percent\":" + used +
+        QuotaSnapshot result = QuotaReader.ParseUsage("{\"rate_limit\":{\"primary_window\":{\"used_percent\":" + used +
             ",\"limit_window_seconds\":18000,\"reset_at\":1790863200},\"secondary_window\":{\"used_percent\":10," +
             "\"limit_window_seconds\":604800,\"reset_at\":1791457200}}}", auth);
+        result.ProfileReadSucceeded = profileReadSucceeded;
+        if (profileReadSucceeded)
+            result.DisplayName = QuotaReader.ParseProfileDisplayName(new JavaScriptSerializer().Serialize(
+                new { profile = new { display_name = name, username = "fixture-handle" } }));
+        return result;
     }
 
     private static void PumpUntil(Func<bool> done)
@@ -82,8 +88,10 @@ internal static class RegressionTests
             File.WriteAllText(args[2], new JavaScriptSerializer().Serialize(new {
                 outside_codex_package = independent, startup_matches = startupMatches,
                 account_matches = accountMatches, windows = quota == null ? 0 : quota.Windows.Count,
-                display_name_available = after != null && !String.IsNullOrEmpty(after.DisplayName),
-                display_name_matches = auth != null && after != null && auth.DisplayName == after.DisplayName,
+                display_name_available = quota != null && !String.IsNullOrEmpty(quota.DisplayName),
+                display_name_from_profile = quota != null && quota.ProfileReadSucceeded,
+                display_name_matches_reference = args.Length > 4 && quota != null &&
+                    quota.DisplayName == args[4],
                 diagnostic = QuotaReader.LastDiagnostic
             }));
             Check(independent && startupMatches && (expectedDisabled || accountMatches),
@@ -104,7 +112,8 @@ internal static class RegressionTests
             }
             Check(after != null && result.CredentialFingerprint == after.Fingerprint,
                 "live quota belongs to current credentials");
-            Console.WriteLine("LIVE_OK: account_matches=true; windows=" + result.Windows.Count);
+            Check(result.ProfileReadSucceeded, "current profile endpoint is readable");
+            Console.WriteLine("LIVE_OK: account_matches=true; profile_source_verified=true; windows=" + result.Windows.Count);
             return;
         }
 
@@ -115,10 +124,9 @@ internal static class RegressionTests
         string path = Path.Combine(folder, "auth-test.json");
         try
         {
-            File.WriteAllText(path, AuthJson("user-a", "alice@example.invalid", "test-token-a", "Alice"));
+            File.WriteAllText(path, AuthJson("user-a", "alice@example.invalid", "test-token-a", "Different login name"));
             CodexCredentials a = QuotaReader.ReadCredentialsFrom(path);
             Check(a != null && a.AccountLabel == "alice@example.invalid", "email from selected credentials");
-            Check(a.DisplayName == "Alice", "display name comes from the current login claims");
             File.WriteAllText(path, AuthJson("user-b", "bob@example.invalid", "test-token-b", "Bob"));
             CodexCredentials b = QuotaReader.ReadCredentialsFrom(path);
             Check(a.AccountKey != b.AccountKey, "same workspace, different user remains distinct");
@@ -129,29 +137,50 @@ internal static class RegressionTests
                 }))).TrimEnd('=').Replace('+', '-').Replace('/', '_');
             File.WriteAllText(path, AuthJson("user-c", null, "test." + profilePayload + ".test", " "));
             CodexCredentials profile = QuotaReader.ReadCredentialsFrom(path);
-            Check(profile != null && profile.DisplayName == "小林" && profile.AccountLabel == "lin@example.invalid",
-                "access-token profile supplies missing email and display name");
-            File.WriteAllText(path, AuthJson("user-d", "unknown@example.invalid", "test-token-d"));
-            Check(QuotaReader.ReadCredentialsFrom(path).DisplayName == String.Empty,
-                "missing name remains empty rather than invented");
+            Check(profile != null && profile.AccountLabel == "lin@example.invalid",
+                "access-token email supplies missing email");
+            Check(QuotaReader.ParseProfileDisplayName("{\"profile\":{\"display_name\":\" 小林 \",\"username\":\"lin-handle\"}}") == "小林",
+                "editable profile display name is distinct from the handle");
+            Check(QuotaReader.ParseProfileDisplayName("{\"profile\":{\"display_name\":null,\"username\":\"lin-handle\"}}") == String.Empty,
+                "missing display name does not substitute the handle or login claim");
+            Check(QuotaReader.ParseProfileDisplayName("{\"profile\":{\"display_name\":\"  \"}}") == String.Empty,
+                "empty profile display name remains empty");
+            bool invalidSchemaRejected = false;
+            try { QuotaReader.ParseProfileDisplayName("{\"profile\":{\"name\":\"Wrong field\"}}"); }
+            catch (FormatException) { invalidSchemaRejected = true; }
+            Check(invalidSchemaRejected, "unexpected profile schema is treated as a failed lookup");
 
             AccountQuotaState state = new AccountQuotaState();
             state.Bind(a);
+            Check(state.DisplayName == String.Empty, "login claim is not displayed while awaiting profile");
             long revisionA = state.Revision;
-            Check(state.Accept(revisionA, Snapshot(a, 70)), "first account accepts matching response");
+            Check(state.Accept(revisionA, Snapshot(a, 70, "Alice")) && state.DisplayName == "Alice",
+                "first account accepts profile display name with matching quotas");
             state.Bind(b);
-            Check(state.Snapshot == null && state.AccountLabel == "bob@example.invalid" && state.DisplayName == "Bob",
-                "switch clears previous quotas and updates account");
-            Check(!state.Accept(revisionA, Snapshot(a, 1)), "reject request from previous account");
+            Check(state.Snapshot == null && state.AccountLabel == "bob@example.invalid" && state.DisplayName == String.Empty,
+                "switch clears previous quotas and profile name");
+            Check(!state.Accept(revisionA, Snapshot(a, 1, "Old Alice")), "reject request from previous account");
+            Check(state.Accept(state.Revision, Snapshot(b, 47, null, false)) &&
+                state.Snapshot != null && state.DisplayName == String.Empty,
+                "profile failure still displays new-account quotas without previous-account name");
             state.Bind(a);
-            Check(state.DisplayName == "Alice", "switch-back restores the selected user's display name");
-            Check(!state.Accept(revisionA, Snapshot(a, 1)), "A-B-A rejects stale A response");
-            Check(state.Accept(state.Revision, Snapshot(a, 70)), "fresh request after switch-back");
+            Check(state.DisplayName == String.Empty, "switch-back waits for fresh profile lookup");
+            Check(!state.Accept(revisionA, Snapshot(a, 1, "Old Alice")), "A-B-A rejects stale profile and quota response");
+            Check(state.Accept(state.Revision, Snapshot(a, 70, "Alice")), "fresh request after switch-back");
+            Check(state.Accept(state.Revision, Snapshot(a, 69, null, false)) &&
+                state.DisplayName == "Alice" && state.Snapshot.Windows[0].UsedPercent == 69,
+                "profile-only failure keeps verified same-account name while updating quota");
+            Check(state.Accept(state.Revision, Snapshot(a, 68, "Alice Updated")) && state.DisplayName == "Alice Updated",
+                "same-account profile rename updates on the next refresh");
+            Check(state.Accept(state.Revision, Snapshot(a, 67)) && state.DisplayName == String.Empty,
+                "successful empty profile name removes previous display name");
+            state.Accept(state.Revision, Snapshot(a, 66, "Alice"));
 
             File.WriteAllText(path, AuthJson("user-a", "alice@example.invalid", "test-token-a-renewed", "Alice"));
             CodexCredentials renewed = QuotaReader.ReadCredentialsFrom(path);
             state.Bind(renewed);
-            Check(state.Snapshot != null && !state.IsLive, "token renewal keeps only same-user stale snapshot");
+            Check(state.Snapshot != null && !state.IsLive && state.DisplayName == "Alice",
+                "token renewal keeps only same-user verified profile and stale snapshot");
             state.Failed(state.Revision);
             Check(state.Status.Contains("上次数据"), "failed refresh is visibly stale");
             File.WriteAllText(path, "{partial");
@@ -206,7 +235,7 @@ internal static class RegressionTests
                 using (QuotaOverlayForm overlay = new QuotaOverlayForm(delegate { return current; },
                     delegate(CodexCredentials auth) {
                         if (Interlocked.Increment(ref calls) == 1) gate.WaitOne(3000);
-                        return Snapshot(auth, auth == a ? 80 : 47);
+                        return Snapshot(auth, auth == a ? 80 : 47, auth == a ? "Alice" : "Bob");
                     }, delegate { return false; }, false))
                 {
                     overlay.Tick();
@@ -228,7 +257,7 @@ internal static class RegressionTests
 
             IntPtr target = IntPtr.Zero;
             using (QuotaOverlayForm overlay = new QuotaOverlayForm(delegate { return b; },
-                delegate(CodexCredentials auth) { return Snapshot(auth, 47); },
+                delegate(CodexCredentials auth) { return Snapshot(auth, 47, "Bob"); },
                 delegate(IntPtr window) { return window == target; }, false))
             {
                 using (Form first = new Form { StartPosition = FormStartPosition.Manual,
@@ -261,7 +290,7 @@ internal static class RegressionTests
                 Directory.CreateDirectory(args[1]);
                 AccountQuotaState preview = new AccountQuotaState();
                 preview.Bind(a);
-                preview.Accept(preview.Revision, Snapshot(a, 47));
+                preview.Accept(preview.Revision, Snapshot(a, 47, "Alice"));
                 foreach (bool dark in new bool[] { false, true })
                 using (Form host = new Form { FormBorderStyle = FormBorderStyle.None,
                     ClientSize = new Size(1440, 64) })
